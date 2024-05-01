@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/tls"
 	"flag"
 	"fmt"
 	"io/ioutil"
@@ -18,7 +19,7 @@ import (
 	"github.com/aws/aws-sdk-go/aws/credentials"
 	"github.com/aws/aws-sdk-go/aws/defaults"
 	"github.com/aws/aws-sdk-go/aws/request"
-	"github.com/aws/aws-sdk-go/aws/signer/v4"
+	v4 "github.com/aws/aws-sdk-go/aws/signer/v4"
 	"github.com/kelseyhightower/envconfig"
 )
 
@@ -36,7 +37,7 @@ type AppConfig struct {
 }
 
 // NewSigningProxy proxies requests to AWS services which require URL signing using the provided credentials
-func NewSigningProxy(target *url.URL, creds *credentials.Credentials, region string, appConfig AppConfig) *httputil.ReverseProxy {
+func NewSigningProxy(target *url.URL, creds *credentials.Credentials, region string, appConfig AppConfig, insecureSkipVerification bool) *httputil.ReverseProxy {
 	director := func(req *http.Request) {
 		// Rewrite request to desired server host
 		req.URL.Scheme = target.Scheme
@@ -47,10 +48,13 @@ func NewSigningProxy(target *url.URL, creds *credentials.Credentials, region str
 		// aws.request performs more functions than we need here
 		// we only populate enough of the fields to successfully
 		// sign the request
-		config := aws.NewConfig().WithCredentials(creds).WithRegion(region)
+		config := aws.NewConfig().WithCredentials(creds).WithRegion(region).WithLogLevel(aws.LogDebugWithSigning).WithLogger(aws.LoggerFunc(func(args ...interface{}) {
+			fmt.Fprintln(os.Stdout, args...)
+		}))
 
 		clientInfo := metadata.ClientInfo{
-			ServiceName: appConfig.Service,
+			ServiceName:   appConfig.Service,
+			SigningRegion: "eu-west-1",
 		}
 
 		operation := &request.Operation{
@@ -91,9 +95,15 @@ func NewSigningProxy(target *url.URL, creds *credentials.Credentials, region str
 			awsReq.SetBufferBody(buf)
 		}
 
+		//u, _ := url.Parse("https://vpc-recipes-test-domain-lf5lofmebt7l7xfae4il6duotu.eu-west-1.es.amazonaws.com/")
+
 		// Use the updated req.URL for creating the signed request
 		// We pass the full URL object to include Host, Scheme, and any params
 		awsReq.HTTPRequest.URL = req.URL
+
+		log.Printf("DEBUG: %v", awsReq.HTTPRequest)
+		log.Printf("DEBUG: %v", awsReq.Config.Credentials)
+
 		// These are now set above via req, but it's imperative that this remains
 		//  correctly set before calling .Sign()
 		//awsReq.HTTPRequest.URL.Scheme = target.Scheme
@@ -104,10 +114,14 @@ func NewSigningProxy(target *url.URL, creds *credentials.Credentials, region str
 			log.Printf("error signing: %v\n", err)
 		}
 
+		log.Printf("DEBUG: %v", awsReq.HTTPRequest.Header)
+
 		// Write the Signed Headers into the Original Request
 		for k, v := range awsReq.HTTPRequest.Header {
 			req.Header[k] = v
 		}
+
+		log.Printf("DEBUG: %v", req.Header)
 	}
 
 	// transport is http.DefaultTransport but with the ability to override some
@@ -122,6 +136,7 @@ func NewSigningProxy(target *url.URL, creds *credentials.Credentials, region str
 		MaxIdleConns:        100,
 		IdleConnTimeout:     appConfig.IdleConnTimeout,
 		TLSHandshakeTimeout: 10 * time.Second,
+		TLSClientConfig:     &tls.Config{InsecureSkipVerify: insecureSkipVerification},
 	}
 
 	return &httputil.ReverseProxy{
@@ -148,6 +163,7 @@ func main() {
 	var flushInterval = flag.Duration("flush-interval", 0, "Flush interval to flush to the client while copying the response body.")
 	var idleConnTimeout = flag.Duration("idle-conn-timeout", 90*time.Second, "the maximum amount of time an idle (keep-alive) connection will remain idle before closing itself. Zero means no limit.")
 	var dialTimeout = flag.Duration("dial-timeout", 30*time.Second, "The maximum amount of time a dial will wait for a connect to complete.")
+	var InsecureSkipVerify = flag.Bool("insecure-skip-verify", false, "Bypass certificate validation")
 
 	flag.Parse()
 
@@ -181,11 +197,11 @@ func main() {
 	// regionFlag > os.Getenv("AWS_REGION") > "us-west-2"
 	region := *regionFlag
 	if len(region) == 0 {
-		region = "us-west-2"
+		region = "eu-west-1"
 	}
 
 	// Start the proxy server
-	proxy := NewSigningProxy(targetURL, creds, region, appC)
+	proxy := NewSigningProxy(targetURL, creds, region, appC, *InsecureSkipVerify)
 	listenString := fmt.Sprintf(":%v", *portFlag)
 	fmt.Printf("Listening on %v\n", listenString)
 	http.ListenAndServe(listenString, proxy)
