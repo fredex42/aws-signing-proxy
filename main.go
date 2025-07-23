@@ -37,7 +37,7 @@ type AppConfig struct {
 }
 
 // NewSigningProxy proxies requests to AWS services which require URL signing using the provided credentials
-func NewSigningProxy(target *url.URL, creds *credentials.Credentials, region string, appConfig AppConfig, insecureSkipVerification bool) *httputil.ReverseProxy {
+func NewSigningProxy(target *url.URL, creds *credentials.Credentials, region string, appConfig AppConfig, insecureSkipVerification bool, debug bool) *httputil.ReverseProxy {
 	director := func(req *http.Request) {
 		// Rewrite request to desired server host
 		req.URL.Scheme = target.Scheme
@@ -48,9 +48,13 @@ func NewSigningProxy(target *url.URL, creds *credentials.Credentials, region str
 		// aws.request performs more functions than we need here
 		// we only populate enough of the fields to successfully
 		// sign the request
-		config := aws.NewConfig().WithCredentials(creds).WithRegion(region).WithLogLevel(aws.LogDebugWithSigning).WithLogger(aws.LoggerFunc(func(args ...interface{}) {
-			fmt.Fprintln(os.Stdout, args...)
-		}))
+		config := aws.NewConfig().WithCredentials(creds).WithRegion(region)
+
+		if debug {
+			config = config.WithLogLevel(aws.LogDebugWithSigning).WithLogger(aws.LoggerFunc(func(args ...interface{}) {
+				fmt.Fprintln(os.Stdout, args...)
+			}))
+		}
 
 		clientInfo := metadata.ClientInfo{
 			ServiceName:   appConfig.Service,
@@ -101,9 +105,10 @@ func NewSigningProxy(target *url.URL, creds *credentials.Credentials, region str
 		// We pass the full URL object to include Host, Scheme, and any params
 		awsReq.HTTPRequest.URL = req.URL
 
-		log.Printf("DEBUG: %v", awsReq.HTTPRequest)
-		log.Printf("DEBUG: %v", awsReq.Config.Credentials)
-
+		if debug {
+			log.Printf("DEBUG: %v", awsReq.HTTPRequest)
+			log.Printf("DEBUG: %v", awsReq.Config.Credentials)
+		}
 		// These are now set above via req, but it's imperative that this remains
 		//  correctly set before calling .Sign()
 		//awsReq.HTTPRequest.URL.Scheme = target.Scheme
@@ -114,14 +119,18 @@ func NewSigningProxy(target *url.URL, creds *credentials.Credentials, region str
 			log.Printf("error signing: %v\n", err)
 		}
 
-		log.Printf("DEBUG: %v", awsReq.HTTPRequest.Header)
+		if debug {
+			log.Printf("DEBUG: %v", awsReq.HTTPRequest.Header)
+		}
 
 		// Write the Signed Headers into the Original Request
 		for k, v := range awsReq.HTTPRequest.Header {
 			req.Header[k] = v
 		}
 
-		log.Printf("DEBUG: %v", req.Header)
+		if debug {
+			log.Printf("DEBUG: %v", req.Header)
+		}
 	}
 
 	// transport is http.DefaultTransport but with the ability to override some
@@ -164,7 +173,7 @@ func main() {
 	var idleConnTimeout = flag.Duration("idle-conn-timeout", 90*time.Second, "the maximum amount of time an idle (keep-alive) connection will remain idle before closing itself. Zero means no limit.")
 	var dialTimeout = flag.Duration("dial-timeout", 30*time.Second, "The maximum amount of time a dial will wait for a connect to complete.")
 	var InsecureSkipVerify = flag.Bool("insecure-skip-verify", false, "Bypass certificate validation")
-
+	var debug = flag.Bool("debug", false, "Show debugging logs")
 	flag.Parse()
 
 	appC := AppConfig{
@@ -201,7 +210,7 @@ func main() {
 	}
 
 	// Start the proxy server
-	proxy := NewSigningProxy(targetURL, creds, region, appC, *InsecureSkipVerify)
+	proxy := NewSigningProxy(targetURL, creds, region, appC, *InsecureSkipVerify, *debug)
 	listenString := fmt.Sprintf(":%v", *portFlag)
 	fmt.Printf("Listening on %v\n", listenString)
 	http.ListenAndServe(listenString, proxy)
